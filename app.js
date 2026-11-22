@@ -232,9 +232,19 @@
     var n = N.queue().length;
     if (!n) return;
     var bar = el('div', 'bar');
-    bar.appendChild(el('span', null, 'Не відправлено: ' + n));
-    bar.appendChild(button('btn', 'Повторити', sync));
+    // a send in progress is not a failure: say so, and offer "Повторити" only once it has actually failed
+    if (N.sending()) {
+      bar.appendChild(el('span', null, 'Надсилаю…'));
+    } else {
+      bar.appendChild(el('span', null, 'Не відправлено: ' + n));
+      bar.appendChild(button('btn', 'Повторити', sync));
+    }
     root.appendChild(bar);
+  }
+
+  function pendingLine(deleting) {
+    if (N.sending()) return deleting ? 'видаляю…' : 'надсилаю…';
+    return deleting ? 'видалення очікує відправки' : 'очікує відправки';
   }
 
   function renderBanner() {
@@ -440,9 +450,10 @@
 
   // After a save: show the pending state at once, then try to send.
   function afterSave() {
+    var sending = N.flush(); // start first, so the render below already shows "надсилаю…"
     renderNow();
     haptic('success');
-    N.flush().then(function (r) {
+    sending.then(function (r) {
       notice = flushNotice(r.failed);
       render();
     });
@@ -572,7 +583,7 @@
     var lastLine = lastText(last ? C.formatEntry(last) : '', last && last.date);
     var o = {
       key: 'ex|' + name, name: name,
-      sub: v.deleting ? 'видалення очікує відправки' : (v.pending ? 'очікує відправки' : lastLine),
+      sub: (v.deleting || v.pending) ? pendingLine(v.deleting) : lastLine,
       mark: v.pending ? '⏳' : (v.entry ? '✓' : ''),
       done: !!(v.entry && !v.pending),
       res: v.entry ? C.formatEntry(v.entry) : '',
@@ -674,7 +685,7 @@
       var lastLine = lastText(last ? C.formatNumber(last.value) + ' ' + t.unit : '', last && last.date);
       var o = {
         key: 'm|' + param, name: param,
-        sub: v.deleting ? 'видалення очікує відправки' : (v.pending ? 'очікує відправки' : lastLine),
+        sub: (v.deleting || v.pending) ? pendingLine(v.deleting) : lastLine,
         mark: v.pending ? '⏳' : (v.value !== null ? '✓' : ''),
         done: v.value !== null && !v.pending,
         res: v.value !== null ? C.formatNumber(v.value) + ' ' + t.unit : '',

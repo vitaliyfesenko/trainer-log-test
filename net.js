@@ -266,6 +266,7 @@
     request: request,
     enqueue: enqueue,
     flush: flush,
+    sending: function () { return flushing; },
     queue: getQueue,
     rejected: rejected,
     dismissRejected: dismissRejected,
