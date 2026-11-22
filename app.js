@@ -653,6 +653,7 @@
       clearTimeout(pendingTimer);
       var text = (sessionDraft === null ? sn.text : sessionDraft).trim();
       sessionDraft = null;
+      if (text === '' && !sn.text) { renderNow(); return; } // nothing written and nothing to clear: no note is fine
       enqueue({ kind: 'sessionNote', date: today(), client: clientName, text: text });
       afterSave();
     }));
