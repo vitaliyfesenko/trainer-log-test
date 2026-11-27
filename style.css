@@ -133,3 +133,40 @@ textarea.area:focus { border-color: var(--btn); }
 textarea.prog-text { min-height: 240px; line-height: 1.4; }
 .prog-btns { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .prog-status { min-height: 44px; padding: 10px 4px; color: var(--hint); font-size: 14px; }
+
+/* ---- client management ---- */
+.searchbar { display: flex; gap: 8px; margin-bottom: 8px; }
+.searchbar .search { flex: 1 1 auto; min-width: 0; width: auto; margin-bottom: 0; }
+.searchbar .btn { flex: 0 0 auto; padding: 8px 14px; }
+.hidden-toggle { margin-top: 16px; border-top: 1px solid var(--sec); }
+.hidden-toggle .client-name { color: var(--hint); }
+.hidden-client .client-name { color: var(--hint); font-weight: 400; }
+.head .btn.secondary { padding: 8px 12px; }
+
+.form-title { margin: 0 0 12px; font-size: 18px; overflow-wrap: anywhere; }
+.cform { margin-bottom: 12px; }
+.cform .flabel { display: block; margin: 12px 0 4px; color: var(--hint); font-size: 13px; }
+.cform .flabel:first-child { margin-top: 0; }
+.cform .seg, .cform .tabs { margin-bottom: 0; }
+.cform .tab:disabled, .btn:disabled, .linkbtn:disabled { opacity: 0.6; cursor: default; }
+input.text {
+  width: 100%; min-height: 48px; padding: 8px 12px;
+  font: inherit; font-size: 16px; color: var(--text); background: var(--sec);
+  border: 2px solid transparent; border-radius: 10px; outline: none;
+}
+input.text:focus { border-color: var(--btn); }
+input.text.invalid { border-color: var(--tg-theme-destructive-text-color, #e5484d); }
+.exform .tabs + input.text { margin-top: 8px; }
+.cform .btns { display: flex; gap: 8px; margin-top: 16px; }
+.cform .btns .btn { flex: 1 1 0; }
+.form-error { margin-top: 10px; color: var(--tg-theme-destructive-text-color, #e5484d); font-size: 14px; }
+.cform-bar { justify-content: flex-start; padding: 12px 0 0; flex-wrap: wrap; }
+.cform-bar .btn { flex: 1 1 100%; }
+
+.empty-prog { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.empty-prog .form-error { margin-top: 0; }
+.addex { width: 100%; margin-top: 12px; }
+.exform { margin-top: 12px; padding: 12px; border-radius: 10px; border: 1px solid var(--sec); }
+.progbar { padding: 4px 0 0; flex-wrap: wrap; }
+.progbar .q { flex: 1 1 100%; }
+.form .form-error { margin-top: 4px; }

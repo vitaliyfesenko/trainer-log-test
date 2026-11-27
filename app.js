@@ -11,8 +11,11 @@
 
   var root = document.getElementById('app');
 
-  var screen = 'list';      // 'list' | 'client' | 'progress'
+  var screen = 'list';      // 'list' | 'client' | 'progress' | 'clientForm'
   var clients = null;       // [{name, lastDate, absent}]
+  var templates = [];       // names of program templates
+  var hidden = [];          // [{name}] of hidden clients
+  var showHidden = false;
   var query = '';
   var clientName = null;
   var cstate = null;        // ClientState of clientName
@@ -28,6 +31,16 @@
   var syncing = false;
   var mine = [];            // enqueued items not yet folded into the server state
   var appliedLog = [];      // items folded in during this session
+  // client form: {mode:'new'|'edit', orig, name, goal, note, template, active, origGoal, origNote,
+  //               back:'list'|'client', loading, confirmHide, saving, error}
+  var form = null;
+  var exForm = null;        // «+ Вправа» form: {workout, newWorkout, exercise, type, saving, error}
+  var op = null;            // applyTemplate / removeExercise in progress: {key, saving, error}
+  var removeKey = null;     // open exercise whose removal from the program awaits confirmation
+
+  var NO_CONNECTION = 'Немає зв\'язку. Спробуйте ще раз.';
+  var QUEUE_GUARD = 'Спершу дочекайтеся відправки записів';
+  var GOALS = [['схуднення', 'схуднення'], ['набір маси', 'набір маси'], ['', 'без мети']];
 
   function today() { return C.localDate(new Date()); }
 
@@ -47,6 +60,24 @@
 
   function flushNotice(failed) {
     return failed && failed !== 'network' ? errorNotice(failed, N.lastError()) : null;
+  }
+
+  // ---------- client list ----------
+  function setListData(c, t, h) {
+    clients = c;
+    templates = Array.isArray(t) ? t : [];
+    hidden = Array.isArray(h) ? h : [];
+    N.cacheSet(K_CLIENTS, { clients: clients, templates: templates, hidden: hidden });
+  }
+  function allNames() {
+    return (clients || []).concat(hidden).map(function (c) { return c.name; });
+  }
+  // background refresh after a change to the list; a failure leaves the local update in place
+  async function refreshList() {
+    try {
+      var res = await N.request({ action: 'clients' });
+      if (res && res.ok && Array.isArray(res.clients)) { setListData(res.clients, res.templates, res.hidden); render(); }
+    } catch (e) { /* the list syncs again when shown */ }
   }
 
   // ---------- client cache ----------
@@ -120,7 +151,9 @@
 
   // ---------- sync: flush -> fetch ----------
   var syncAgain = false;
-  function viewKey() { return screen === 'list' ? 'list' : (screen === 'client' ? 'client|' + clientName : null); }
+  // the client form works on the list data (names for the duplicate check, templates, hidden)
+  function dataScreen() { return screen === 'clientForm' ? 'list' : screen; }
+  function viewKey() { var d = dataScreen(); return d === 'list' ? 'list' : (d === 'client' ? 'client|' + clientName : null); }
 
   // One pass can fetch a screen the user has already left, or be asked for while
   // another pass runs: loop until the data of the current screen was fetched.
@@ -146,9 +179,9 @@
     if (fr.failed && ACCESS_ERRORS.indexOf(fr.failed) !== -1) return null;
     if (screen === 'progress') return null;
 
-    var forScreen = screen, forClient = clientName, mark = appliedLog.length;
+    var forScreen = dataScreen(), forClient = clientName, mark = appliedLog.length;
     var key = viewKey();
-    function current() { return screen === forScreen && (forScreen === 'list' || clientName === forClient); }
+    function current() { return dataScreen() === forScreen && (forScreen === 'list' || clientName === forClient); }
     var res;
     try {
       res = await N.request(forScreen === 'list' ? { action: 'clients' } : { action: 'client', client: forClient });
@@ -161,8 +194,7 @@
     }
     if (forScreen === 'list') {
       if (res && res.ok && Array.isArray(res.clients)) {
-        clients = res.clients;
-        N.cacheSet(K_CLIENTS, clients);
+        setListData(res.clients, res.templates, res.hidden);
         if (current() && notice && notice.fromLoad) notice = null;
       } else if (current()) {
         notice = errorNotice((res && res.error) || 'server_error', res);
@@ -176,6 +208,11 @@
         cstate = st; cstateDate = today();
         if (notice && notice.fromLoad) notice = null;
       }
+    } else if (forScreen === 'client' && res && res.error === 'malformed') {
+      // no client under this name (renamed elsewhere, or a rename the app did not see succeed):
+      // records made on this screen would be rejected, so leave it for the refreshed list
+      N.cacheRemove(K_CLIENT + forClient);
+      if (current()) { backToList(); return key; }
     } else if (current()) {
       notice = errorNotice((res && res.error) || 'server_error', res);
       notice.fromLoad = true;
@@ -295,7 +332,9 @@
       cstateDate = today();
       sync(); // past midnight: refresh «минулого разу»
     }
-    if (screen === 'client') renderClient(); else renderList();
+    if (screen === 'client') renderClient();
+    else if (screen === 'clientForm') renderClientForm();
+    else renderList();
   }
 
   // ---------- screen 1: client list ----------
@@ -318,7 +357,10 @@
     search.placeholder = 'Пошук клієнта';
     search.setAttribute('autocomplete', 'off');
     search.value = query;
-    root.appendChild(search);
+    var top = el('div', 'searchbar');
+    top.appendChild(search);
+    top.appendChild(button('btn', '+ Клієнт', openNewClient));
+    root.appendChild(top);
     var list = el('div', 'list');
     root.appendChild(list);
     function fill() {
@@ -341,7 +383,27 @@
     }
     search.addEventListener('input', function () { query = search.value; fill(); });
     fill();
+    renderHidden();
     renderBar();
+  }
+
+  function renderHidden() {
+    if (!hidden.length) return;
+    var toggle = el('button', 'client-row hidden-toggle');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', showHidden ? 'true' : 'false');
+    toggle.appendChild(el('span', 'client-name', 'Приховані (' + hidden.length + ')'));
+    toggle.appendChild(el('span', 'client-date', showHidden ? '▾' : '▸'));
+    toggle.addEventListener('click', function () { showHidden = !showHidden; renderNow(); });
+    root.appendChild(toggle);
+    if (!showHidden) return;
+    hidden.forEach(function (c) {
+      var row = el('button', 'client-row hidden-client');
+      row.type = 'button';
+      row.appendChild(el('span', 'client-name', c.name));
+      row.addEventListener('click', function () { openHiddenClient(c.name); });
+      root.appendChild(row);
+    });
   }
 
   function openClient(name) {
@@ -351,6 +413,7 @@
     cstateDate = today();
     tab = 'train'; selected = null; openKey = null; draft = null; confirmKey = null;
     noteEdit = false; sessionDraft = null;
+    exForm = null; op = null; removeKey = null;
     notice = null;
     renderNow();
     sync();
@@ -379,6 +442,7 @@
   function renderClient() {
     var head = el('div', 'head');
     head.appendChild(button('back', '← ' + clientName, backToList));
+    if (cstate) head.appendChild(button('btn secondary', 'Змінити', openEditClient));
     if (window.TLProgress) head.appendChild(button('btn', 'Прогрес', openProgress));
     root.appendChild(head);
     renderRejected();
@@ -403,7 +467,7 @@
       var b = el('button', 'tab' + (tab === t[0] ? ' active' : ''), t[1]);
       b.type = 'button';
       b.addEventListener('click', function () {
-        tab = t[0]; openKey = null; draft = null; confirmKey = null;
+        tab = t[0]; openKey = null; draft = null; confirmKey = null; removeKey = null;
         renderNow();
       });
       seg.appendChild(b);
@@ -512,6 +576,8 @@
     row.appendChild(main);
     if (o.res) row.appendChild(el('div', 'res', o.res));
     function toggle() {
+      removeKey = null;
+      if (op && !op.saving) op = null;
       if (isOpen) { openKey = null; draft = null; }
       else { openKey = o.key; draft = o.initialDraft(); confirmKey = null; }
       renderNow();
@@ -554,7 +620,7 @@
   // ----- workouts -----
   function renderTrain(view) {
     if (!cstate.program.length) {
-      root.appendChild(messageBlock('Програма порожня. Додайте вправи клієнту на аркуші «Програма» в таблиці.'));
+      renderEmptyProgram();
     } else {
       var wk = currentWorkout();
       var tabs = el('div', 'tabs');
@@ -562,7 +628,7 @@
         var b = el('button', 'tab' + (p.workout === wk ? ' active' : ''), p.workout);
         b.type = 'button';
         b.addEventListener('click', function () {
-          selected = p.workout; openKey = null; draft = null; confirmKey = null;
+          selected = p.workout; openKey = null; draft = null; confirmKey = null; removeKey = null;
           renderNow();
         });
         tabs.appendChild(b);
@@ -572,6 +638,7 @@
       var list = el('div', 'list');
       program.exercises.forEach(function (x) { list.appendChild(exerciseItem(x, view, wk)); });
       root.appendChild(list);
+      renderAddExercise();
     }
     renderSessionNote(view);
   }
@@ -644,6 +711,7 @@
         afterSave();
       }
       form.appendChild(saveButton(submit, all));
+      form.appendChild(removeFromProgram(wk, name));
       return form;
     };
     return buildItem(o);
@@ -719,6 +787,432 @@
     root.appendChild(list);
   }
 
+  // ---------- client management (direct requests, not the queue) ----------
+  function manageErrorText(code, res) {
+    if (code === 'duplicate_name') return 'Клієнт з таким ім\'ям уже є.';
+    if (code === 'duplicate_exercise') return 'Така вправа вже є в програмі.';
+    if (code === 'invalid_entry') return 'Не вдалося зберегти: дані змінилися. Оновіть і спробуйте ще раз.';
+    return errorNotice(code, res).text;
+  }
+
+  // ctx is replaced or cleared when the user leaves its screen or form
+  function ctxCurrent(ctx) { return ctx === form || ctx === exForm || ctx === op; }
+
+  // Sends one manage action. ctx ({saving, error}: form, exForm or op) drives «Зберігаю…» and the error line;
+  // what the user typed lives in ctx and survives a failure. A result that arrives after the user
+  // left (ctx no longer current) is ignored.
+  async function manage(payload, onOk, ctx) {
+    ctx = ctx || form;
+    if (!ctx || ctx.saving) return;
+    clearTimeout(pendingTimer);
+    ctx.saving = true; ctx.error = null;
+    renderNow();
+    var res;
+    try {
+      res = await N.request(payload);
+    } catch (e) {
+      ctx.saving = false;
+      if (!ctxCurrent(ctx)) return;
+      ctx.error = NO_CONNECTION;
+      haptic('error');
+      render();
+      return;
+    }
+    ctx.saving = false;
+    if (!ctxCurrent(ctx)) return;
+    if (res && res.ok) { haptic('success'); onOk(); return; }
+    var code = (res && res.error) || 'server_error';
+    // the client may already carry another name (an earlier attempt went through unseen): leaving the form
+    // must not return to a client screen under a dead name
+    if (code === 'invalid_entry' && payload.action === 'editClient' && ctx === form) ctx.back = 'list';
+    ctx.error = manageErrorText(code, res);
+    haptic('error');
+    render();
+    if (code === 'invalid_entry') sync(); // the data changed elsewhere: reload the current screen
+  }
+
+  function errorLine(ctx) {
+    return ctx && ctx.error ? el('div', 'form-error', ctx.error) : null;
+  }
+  function append(parent, child) { if (child) parent.appendChild(child); }
+
+  // rename or remove under queued items would get them rejected. With opKey the message shows
+  // next to that button, otherwise in the banner.
+  function guardQueue(name, opKey) {
+    if (!C.hasPending(N.queue(), name)) return false;
+    if (opKey) op = { key: opKey, saving: false, error: QUEUE_GUARD };
+    else notice = { text: QUEUE_GUARD };
+    haptic('warning');
+    renderNow();
+    return true;
+  }
+
+  function knownGoal(g) { return g === 'схуднення' || g === 'набір маси' ? g : ''; }
+
+  function openNewClient() {
+    form = { mode: 'new', orig: null, name: '', goal: '', note: '', template: '', active: true, back: 'list', saving: false, error: null };
+    screen = 'clientForm';
+    notice = null;
+    renderNow();
+  }
+
+  function openEditClient() {
+    if (!cstate || guardQueue(clientName)) return;
+    var goal = knownGoal(cstate.goal || ''), note = cstate.note || '';
+    form = { mode: 'edit', orig: clientName, name: clientName, goal: goal, note: note, origGoal: goal, origNote: note,
+      active: true, back: 'client', confirmHide: false, saving: false, error: null };
+    screen = 'clientForm';
+    notice = null;
+    renderNow();
+  }
+
+  function openHiddenClient(name) {
+    if (guardQueue(name)) return;
+    form = { mode: 'edit', orig: name, name: name, goal: '', note: '', origGoal: '', origNote: '',
+      active: false, back: 'list', loading: true, saving: false, error: null };
+    screen = 'clientForm';
+    notice = null;
+    loadFormClient();
+  }
+
+  // a hidden client's goal and note are not in the list: fetch them before the form can be saved
+  async function loadFormClient() {
+    var f = form;
+    f.loading = true; f.error = null;
+    renderNow();
+    var res;
+    try { res = await N.request({ action: 'client', client: f.orig }); }
+    catch (e) { if (form === f) { f.error = NO_CONNECTION; render(); } return; }
+    if (form !== f) return;
+    if (res && res.ok && res.client) {
+      f.goal = f.origGoal = knownGoal(res.client.goal || '');
+      f.note = f.origNote = res.client.note || '';
+      f.loading = false;
+    } else {
+      f.error = errorNotice((res && res.error) || 'server_error', res).text;
+    }
+    render();
+  }
+
+  function closeForm() {
+    var back = form ? form.back : 'list';
+    form = null;
+    if (back === 'client') { screen = 'client'; notice = null; renderNow(); sync(); }
+    else backToList();
+  }
+
+  function choice(cls, items, value, onPick, disabled) {
+    var seg = el('div', cls);
+    items.forEach(function (it) {
+      var b = button('tab' + (it[0] === value ? ' active' : ''), it[1], function () { onPick(it[0]); renderNow(); });
+      b.setAttribute('aria-pressed', it[0] === value ? 'true' : 'false');
+      if (disabled) b.disabled = true;
+      seg.appendChild(b);
+    });
+    return seg;
+  }
+
+  function textInput(id, value, max, onInput, invalid) {
+    var inp = document.createElement('input');
+    inp.id = id;
+    inp.type = 'text';
+    inp.className = 'text' + (invalid ? ' invalid' : '');
+    inp.maxLength = max;
+    inp.setAttribute('autocomplete', 'off');
+    inp.value = value;
+    inp.addEventListener('input', function () { onInput(inp.value); inp.classList.remove('invalid'); });
+    return inp;
+  }
+
+  function labelFor(id, text) {
+    var l = el('label', 'flabel', text);
+    l.setAttribute('for', id);
+    return l;
+  }
+
+  function renderClientForm() {
+    var f = form;
+    var isNew = f.mode === 'new';
+    root.appendChild(el('h2', 'form-title', isNew ? 'Новий клієнт' : f.orig));
+    renderRejected();
+    renderBanner();
+    if (f.loading) {
+      if (!f.error) { root.appendChild(messageBlock('Завантаження…')); return; }
+      var box = el('div', 'message');
+      box.appendChild(el('p', null, f.error));
+      box.appendChild(button('btn', 'Повторити', loadFormClient));
+      var cancelLoad = button('btn secondary', 'Скасувати', closeForm);
+      cancelLoad.disabled = !!f.saving;
+      box.appendChild(cancelLoad);
+      root.appendChild(box);
+      return;
+    }
+    var wrap = el('div', 'cform');
+
+    wrap.appendChild(labelFor('cf-name', 'Ім\'я'));
+    var nameInp = textInput('cf-name', f.name, 60, function (v) { f.name = v; f.badName = false; }, f.badName);
+    wrap.appendChild(nameInp);
+
+    wrap.appendChild(el('div', 'flabel', 'Мета'));
+    wrap.appendChild(choice('seg', GOALS, f.goal, function (v) { f.goal = v; }, f.saving));
+
+    if (isNew && templates.length) {
+      wrap.appendChild(el('div', 'flabel', 'Шаблон'));
+      var items = templates.map(function (t) { return [t, t]; }).concat([['', 'Без шаблону']]);
+      wrap.appendChild(choice('tabs', items, f.template, function (v) { f.template = v; }, f.saving));
+    }
+
+    wrap.appendChild(labelFor('cf-note', 'Нотатка'));
+    var ta = document.createElement('textarea');
+    ta.id = 'cf-note';
+    ta.className = 'area';
+    ta.maxLength = 2000;
+    ta.value = f.note;
+    ta.addEventListener('input', function () { f.note = ta.value; });
+    wrap.appendChild(ta);
+
+    append(wrap, errorLine(f));
+
+    var btns = el('div', 'btns');
+    var save = button('btn', f.saving ? 'Зберігаю…' : 'Зберегти', function () { submitClientForm(f.active); });
+    save.disabled = !!f.saving;
+    btns.appendChild(save);
+    // a request in flight may be a rename: cancelling would hide its result and leave a dead name on screen
+    var cancel = button('btn secondary', 'Скасувати', closeForm);
+    cancel.disabled = !!f.saving;
+    btns.appendChild(cancel);
+    wrap.appendChild(btns);
+    nameInp.addEventListener('keydown', function (e) { if (e.key === 'Enter') submitClientForm(f.active); });
+
+    if (!isNew) {
+      var bar = el('div', 'delbar cform-bar');
+      if (!f.active) {
+        var back = button('btn', 'Повернути', function () { submitClientForm(true); });
+        back.disabled = !!f.saving;
+        bar.appendChild(back);
+      } else if (f.confirmHide) {
+        bar.appendChild(el('span', 'q', 'Приховати? Історія збережеться.'));
+        var yes = button('linkbtn danger', 'Так', hideClient);
+        yes.disabled = !!f.saving;
+        bar.appendChild(yes);
+        bar.appendChild(button('linkbtn plain', 'Ні', function () { f.confirmHide = false; renderNow(); }));
+      } else {
+        bar.appendChild(button('linkbtn', 'Приховати клієнта', function () { f.confirmHide = true; renderNow(); }));
+      }
+      wrap.appendChild(bar);
+    }
+    root.appendChild(wrap);
+    renderBar();
+  }
+
+  // checks done here so a bad or duplicate name never costs a request
+  function validName(f) {
+    var name = C.checkName(f.name);
+    if (name === null) {
+      f.badName = true; f.error = null;
+      haptic('error');
+      renderNow();
+      return null;
+    }
+    if (C.nameTaken(allNames(), name, f.mode === 'edit' ? f.orig : null)) {
+      f.error = 'Клієнт з таким ім\'ям уже є.';
+      haptic('error');
+      renderNow();
+      return null;
+    }
+    return name;
+  }
+
+  function submitClientForm(active) {
+    var f = form;
+    if (!f || f.saving) return;
+    var name = validName(f);
+    if (name === null) return;
+    var note = f.note.trim();
+    if (f.mode === 'new') {
+      manage({ action: 'addClient', name: name, goal: f.goal, note: note, template: f.template }, function () {
+        form = null;
+        setListData((clients || []).concat([{ name: name, lastDate: null, absent: false }]), templates, hidden);
+        refreshList();
+        openClient(name);
+      }, f);
+      return;
+    }
+    var old = f.orig, wasActive = f.active;
+    manage({ action: 'editClient', client: old, name: name, goal: f.goal, note: note, active: active }, function () {
+      form = null;
+      if (name !== old) N.cacheRemove(K_CLIENT + old);
+      if (wasActive && cstate) { // the cached screen shows at once under the new name, then syncs
+        cstate.name = name; cstate.goal = f.goal; cstate.note = note;
+        saveCached(name, cstate);
+      }
+      var rest = (clients || []).filter(function (c) { return c.name !== old; });
+      var restHidden = hidden.filter(function (c) { return c.name !== old; });
+      if (active) {
+        var prev = (clients || []).filter(function (c) { return c.name === old; })[0];
+        setListData(rest.concat([{ name: name, lastDate: prev ? prev.lastDate : null, absent: prev ? prev.absent : false }]), templates, restHidden);
+      } else {
+        setListData(rest, templates, restHidden.concat([{ name: name }]));
+      }
+      refreshList();
+      if (wasActive && active) openClient(name);
+      else backToList(); // restored, or a hidden client edited
+    }, f);
+  }
+
+  function hideClient() {
+    var f = form;
+    manage({ action: 'editClient', client: f.orig, name: f.orig, goal: f.origGoal, note: f.origNote, active: false }, function () {
+      form = null;
+      setListData((clients || []).filter(function (c) { return c.name !== f.orig; }), templates, hidden.concat([{ name: f.orig }]));
+      refreshList();
+      backToList();
+    }, f);
+  }
+
+  // ----- program changes on the client screen -----
+  function opButton(cls, key, text, fn) {
+    var busy = op && op.key === key && op.saving;
+    var b = button(cls, busy ? 'Зберігаю…' : text, fn);
+    if (op && op.saving) b.disabled = true;
+    return b;
+  }
+
+  function renderEmptyProgram() {
+    var box = el('div', 'empty-prog');
+    templates.forEach(function (t) {
+      var key = 'tpl|' + t;
+      box.appendChild(opButton('btn', key, 'Застосувати шаблон «' + t + '»', function () {
+        if (guardQueue(clientName, key)) return;
+        var ctx = op = { key: key, saving: false, error: null };
+        manage({ action: 'applyTemplate', client: clientName, template: t }, function () {
+          ctx.saving = true; // keep «Зберігаю…» until the new program is loaded
+          renderNow();
+          sync().then(function () { if (op === ctx) { op = null; render(); } });
+        }, ctx);
+      }));
+    });
+    append(box, op && op.key.indexOf('tpl|') === 0 ? errorLine(op) : null);
+    root.appendChild(box);
+    renderAddExercise();
+  }
+
+  function renderAddExercise() {
+    if (!exForm) {
+      root.appendChild(button('btn secondary addex', '+ Вправа', function () {
+        exForm = { workout: cstate.program.length ? currentWorkout() : '', newWorkout: '', exercise: '', type: 'вага', saving: false, error: null };
+        renderNow();
+      }));
+      return;
+    }
+    var f = exForm;
+    var box = el('div', 'cform exform');
+    var workouts = cstate.program.map(function (p) { return p.workout; });
+    var typed = f.newWorkout.trim() !== '';
+    var seg = null;
+    if (workouts.length) {
+      box.appendChild(el('div', 'flabel', 'Тренування'));
+      seg = choice('tabs', workouts.map(function (w) { return [w, w]; }), typed ? null : f.workout,
+        function (v) { f.workout = v; f.newWorkout = ''; f.badWorkout = false; }, f.saving);
+      box.appendChild(seg);
+    } else {
+      box.appendChild(labelFor('ex-new', 'Тренування'));
+    }
+    var wInp = textInput('ex-new', f.newWorkout, 60, function (v) {
+      f.newWorkout = v; f.badWorkout = false;
+      if (seg) Array.prototype.forEach.call(seg.children, function (b, i) {
+        b.classList.toggle('active', v.trim() === '' && workouts[i] === f.workout);
+      });
+    }, f.badWorkout);
+    wInp.placeholder = 'нове тренування';
+    box.appendChild(wInp);
+
+    box.appendChild(labelFor('ex-name', 'Вправа'));
+    var nInp = textInput('ex-name', f.exercise, 60, function (v) { f.exercise = v; f.badExercise = false; }, f.badExercise);
+    box.appendChild(nInp);
+
+    box.appendChild(el('div', 'flabel', 'Тип'));
+    box.appendChild(choice('seg', [['вага', 'вага'], ['час', 'час']], f.type, function (v) { f.type = v; }, f.saving));
+
+    append(box, errorLine(f));
+    var btns = el('div', 'btns');
+    var save = button('btn', f.saving ? 'Зберігаю…' : 'Зберегти', submitExercise);
+    save.disabled = !!f.saving;
+    btns.appendChild(save);
+    btns.appendChild(button('btn secondary', 'Скасувати', function () { exForm = null; renderNow(); }));
+    box.appendChild(btns);
+    [wInp, nInp].forEach(function (inp) {
+      inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') submitExercise(); });
+    });
+    root.appendChild(box);
+  }
+
+  function submitExercise() {
+    var f = exForm;
+    if (!f || f.saving) return;
+    var workout = C.checkName(f.newWorkout.trim() !== '' ? f.newWorkout : f.workout);
+    var exercise = C.checkName(f.exercise);
+    if (workout === null || exercise === null) {
+      f.badWorkout = workout === null; f.badExercise = exercise === null; f.error = null;
+      haptic('error');
+      renderNow();
+      return;
+    }
+    var dup = cstate.program.some(function (p) { return p.exercises.some(function (x) { return x.name === exercise; }); });
+    if (dup) { f.error = 'Така вправа вже є в програмі.'; haptic('error'); renderNow(); return; }
+    var client = clientName, type = f.type;
+    manage({ action: 'addExercise', client: client, workout: workout, exercise: exercise, type: type }, function () {
+      exForm = null;
+      if (clientName === client && cstate) {
+        var group = cstate.program.filter(function (p) { return p.workout === workout; })[0];
+        if (!group) { group = { workout: workout, exercises: [] }; cstate.program.push(group); }
+        group.exercises.push({ name: exercise, type: type });
+        saveCached(client, cstate);
+        selected = workout;
+      }
+      renderNow();
+      sync();
+    }, f);
+  }
+
+  function removeFromProgram(wk, name) {
+    var key = 'rm|' + wk + '|' + name;
+    var bar = el('div', 'delbar progbar');
+    if (removeKey === key) {
+      bar.appendChild(el('span', 'q', 'Прибрати вправу з програми? Записи в журналі лишаться.'));
+      bar.appendChild(opButton('linkbtn danger', key, 'Так', function () {
+        var client = clientName;
+        op = { key: key, saving: false, error: null };
+        manage({ action: 'removeExercise', client: client, workout: wk, exercise: name }, function () {
+          op = null; removeKey = null;
+          if (clientName === client && cstate) {
+            cstate.program = cstate.program.map(function (p) {
+              return p.workout !== wk ? p : { workout: p.workout, exercises: p.exercises.filter(function (x) { return x.name !== name; }) };
+            }).filter(function (p) { return p.exercises.length; });
+            saveCached(client, cstate);
+            if (openKey === 'ex|' + name) { openKey = null; draft = null; }
+          }
+          renderNow();
+          sync();
+        }, op);
+      }));
+      // disabled while the removal is in flight: dropping op would drop its result
+      var no = button('linkbtn plain', 'Ні', function () { removeKey = null; op = null; renderNow(); });
+      no.disabled = !!(op && op.saving);
+      bar.appendChild(no);
+    } else {
+      bar.appendChild(button('linkbtn', 'Прибрати з програми', function () {
+        if (guardQueue(clientName, key)) return;
+        removeKey = key; op = null;
+        renderNow();
+      }));
+    }
+    var wrap = el('div');
+    wrap.appendChild(bar);
+    append(wrap, op && op.key === key ? errorLine(op) : null);
+    return wrap;
+  }
+
   // ---------- start ----------
   try { if (tg) { tg.ready(); tg.expand(); } } catch (e) { /* not in Telegram */ }
 
@@ -732,7 +1226,12 @@
     N.init({ apiUrl: apiUrl, initData: initData, mock: mock });
     mine = N.queue();
     var cachedList = N.cacheGet(K_CLIENTS);
-    if (Array.isArray(cachedList)) clients = cachedList;
+    if (Array.isArray(cachedList)) clients = cachedList; // cache written before templates and hidden clients
+    else if (cachedList && Array.isArray(cachedList.clients)) {
+      clients = cachedList.clients;
+      templates = Array.isArray(cachedList.templates) ? cachedList.templates : [];
+      hidden = Array.isArray(cachedList.hidden) ? cachedList.hidden : [];
+    }
     N.onChange(function () { reconcile(); render(); });
     render();
     sync();

@@ -53,6 +53,13 @@
     lsSet(K_RECENT, recent);
   }
 
+  function cacheRemove(key) {
+    lsRemove(key);
+    var recent = lsGet(K_RECENT, []);
+    if (!Array.isArray(recent)) return;
+    lsSet(K_RECENT, recent.filter(function (k) { return k !== key; }));
+  }
+
   // ---------- change notifications ----------
   function onChange(fn) { if (typeof fn === 'function') listeners.push(fn); }
   function notify() {
@@ -81,14 +88,120 @@
     { name: 'Олег П.', lastDate: null, absent: true, ago: 22 },
     { name: 'Тарас Д.', lastDate: null, absent: false, ago: null }
   ];
+  var MOCK_TEMPLATES = {
+    'Жінки': [
+      { workout: 'Ноги', exercises: [{ name: 'Присідання', type: 'вага' }, { name: 'Планка', type: 'час' }] },
+      { workout: 'Верх', exercises: [{ name: 'Тяга блоку', type: 'вага' }] }
+    ],
+    'Чоловіки': [
+      { workout: 'Груди', exercises: [{ name: 'Жим лежачи', type: 'вага' }] },
+      { workout: 'Спина', exercises: [{ name: 'Підтягування', type: 'вага' }, { name: 'Вис', type: 'час' }] }
+    ]
+  };
+  // In-memory demo store for the manage actions; lasts until the page reloads.
+  // base = name of the built-in demo client whose history (today/last/measures) this record keeps.
+  var mockStore = null;
 
-  function mockClients() {
-    return MOCK_CLIENTS.map(function (c) {
-      return { name: c.name, lastDate: c.ago === null ? null : isoDaysAgo(c.ago), absent: c.absent };
+  function copyProgram(p) { return JSON.parse(JSON.stringify(p)); }
+
+  function mockInit() {
+    if (mockStore) return;
+    mockStore = MOCK_CLIENTS.map(function (c) {
+      var st = mockBaseState(c.name);
+      return { name: c.name, base: c.name, active: true, ago: c.ago, absent: c.absent, goal: st.goal, note: st.note, program: st.program };
     });
   }
 
+  function mockFind(name) {
+    mockInit();
+    for (var i = 0; i < mockStore.length; i++) if (mockStore[i].name === name) return mockStore[i];
+    return null;
+  }
+
+  function mockClients() {
+    mockInit();
+    return mockStore.filter(function (r) { return r.active; }).map(function (r) {
+      return { name: r.name, lastDate: r.ago === null ? null : isoDaysAgo(r.ago), absent: r.absent };
+    });
+  }
+
+  function mockHiddenList() {
+    mockInit();
+    return mockStore.filter(function (r) { return !r.active; }).map(function (r) { return { name: r.name }; });
+  }
+
   function mockClientState(name) {
+    var rec = mockFind(name);
+    if (!rec) return null;
+    var st = rec.base ? mockBaseState(rec.base) : mockBaseState('');
+    st.name = rec.name; st.goal = rec.goal; st.note = rec.note; st.program = copyProgram(rec.program);
+    return st;
+  }
+
+  function mockWorkout(rec, workout, create) {
+    for (var i = 0; i < rec.program.length; i++) if (rec.program[i].workout === workout) return rec.program[i];
+    if (!create) return null;
+    var w = { workout: workout, exercises: [] };
+    rec.program.push(w);
+    return w;
+  }
+
+  function mockManage(p) {
+    mockInit();
+    var rec;
+    switch (p.action) {
+      case 'addClient': {
+        var name = C.checkName(p.name);
+        if (name === null) return { ok: false, error: 'invalid_entry' };
+        if (C.nameTaken(mockStore.map(function (r) { return r.name; }), name, null)) return { ok: false, error: 'duplicate_name' };
+        mockStore.push({ name: name, base: null, active: true, ago: null, absent: false, goal: p.goal || '', note: p.note || '', program: copyProgram(MOCK_TEMPLATES[p.template] || []) });
+        return { ok: true };
+      }
+      case 'editClient': {
+        rec = mockFind(p.client);
+        var nn = C.checkName(p.name);
+        if (!rec || nn === null) return { ok: false, error: 'invalid_entry' };
+        if (C.nameTaken(mockStore.map(function (r) { return r.name; }), nn, rec.name)) return { ok: false, error: 'duplicate_name' };
+        rec.name = nn; rec.goal = p.goal || ''; rec.note = p.note || ''; rec.active = p.active !== false;
+        return { ok: true };
+      }
+      case 'applyTemplate': {
+        rec = mockFind(p.client);
+        if (!rec || !MOCK_TEMPLATES[p.template] || rec.program.length) return { ok: false, error: 'invalid_entry' };
+        MOCK_TEMPLATES[p.template].forEach(function (tw) {
+          var w = mockWorkout(rec, tw.workout, true);
+          tw.exercises.forEach(function (e) {
+            if (!w.exercises.some(function (x) { return x.name === e.name; })) w.exercises.push({ name: e.name, type: e.type });
+          });
+        });
+        return { ok: true };
+      }
+      case 'addExercise': {
+        rec = mockFind(p.client);
+        var wn = String(p.workout || '').trim(), en = String(p.exercise || '').trim();
+        if (!rec || !wn || !en || (p.type !== 'вага' && p.type !== 'час')) return { ok: false, error: 'invalid_entry' };
+        var dup = rec.program.some(function (w) { return w.exercises.some(function (x) { return x.name === en; }); });
+        if (dup) return { ok: false, error: 'duplicate_exercise' };
+        var w2 = mockWorkout(rec, wn, true);
+        w2.exercises.push({ name: en, type: p.type });
+        return { ok: true };
+      }
+      case 'removeExercise': {
+        rec = mockFind(p.client);
+        if (!rec) return { ok: false, error: 'invalid_entry' };
+        // nothing matching is fine (idempotent retry), like the server
+        var w3 = mockWorkout(rec, p.workout, false);
+        if (w3) {
+          w3.exercises = w3.exercises.filter(function (x) { return x.name !== p.exercise; });
+          if (!w3.exercises.length) rec.program = rec.program.filter(function (x) { return x !== w3; });
+        }
+        return { ok: true };
+      }
+    }
+    return { ok: false, error: 'unknown_action' };
+  }
+
+  function mockBaseState(name) {
     var base = { name: name, goal: '', note: '', program: [], today: {}, last: {}, measureTypes: [], measuresToday: {}, measuresLast: {}, sessionNote: '' };
     if (name === 'Марія С.') {
       return {
@@ -116,8 +229,7 @@
       base.measureTypes = [{ param: 'Вага тіла', unit: 'кг' }];
       return base;
     }
-    if (name === 'Тарас Д.') return base;
-    return null;
+    return base;
   }
 
   var PERIOD_LABELS = { '4w': '4 тижні', '3m': '3 місяці', '6m': 'півроку', '1y': 'рік', 'all': 'весь час' };
@@ -135,7 +247,7 @@
 
   function mockRequest(payload) {
     switch (payload.action) {
-      case 'clients': return { ok: true, who: 'Демо', clients: mockClients() };
+      case 'clients': return { ok: true, who: 'Демо', clients: mockClients(), templates: Object.keys(MOCK_TEMPLATES), hidden: mockHiddenList() };
       case 'client': {
         var st = mockClientState(payload.client);
         return st ? { ok: true, client: st } : { ok: false, error: 'malformed' };
@@ -143,6 +255,9 @@
       case 'save':
         if (mock === 'offline') throw new Error('offline');
         return { ok: true };
+      case 'addClient': case 'editClient': case 'applyTemplate': case 'addExercise': case 'removeExercise':
+        if (mock === 'offline') throw new Error('offline');
+        return mockManage(payload);
       case 'progress': return { ok: true, text: mockProgress(payload) };
     }
     return { ok: false, error: 'unknown_action' };
@@ -273,6 +388,7 @@
     lastError: lastError,
     cacheGet: cacheGet,
     cacheSet: cacheSet,
+    cacheRemove: cacheRemove,
     onChange: onChange
   };
 })();

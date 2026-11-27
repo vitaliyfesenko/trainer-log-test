@@ -154,11 +154,30 @@
     return list.filter(function (c) { return String(c.name).toLocaleLowerCase('uk').indexOf(q) !== -1; });
   }
 
+  function hasPending(queue, client) {
+    return queue.some(function (i) { return i.client === client; });
+  }
+
+  function nameTaken(names, name, except) {
+    var n = String(name).trim().toLowerCase();
+    var ex = except == null ? null : String(except).trim().toLowerCase();
+    return names.some(function (x) {
+      var k = String(x).trim().toLowerCase();
+      return k === n && k !== ex;
+    });
+  }
+
+  function checkName(name) {
+    var n = String(name).trim();
+    return n.length >= 1 && n.length <= 60 && !/[\r\n]/.test(n) ? n : null;
+  }
+
   var api = {
     parseWeight: parseWeight, parseCount: parseCount, parseSeconds: parseSeconds, localDate: localDate,
     formatShortDate: formatShortDate, formatSeconds: formatSeconds, formatNumber: formatNumber,
     formatEntry: formatEntry, itemKey: itemKey, queueAdd: queueAdd, flushQueue: flushQueue,
-    viewClient: viewClient, filterClients: filterClients
+    viewClient: viewClient, filterClients: filterClients,
+    hasPending: hasPending, nameTaken: nameTaken, checkName: checkName
   };
   globalThis.TLCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
